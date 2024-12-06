@@ -1,0 +1,10 @@
+# Logs
+logs/
+*.log
+
+# Dossiers temporaires
+__pycache__/
+data/
+
+# Environnements virtuels
+venv/
