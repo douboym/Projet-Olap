@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 import psycopg2
+import os
 
 # Fonction 1 : Collecte des données
 def collect_data():
@@ -11,7 +12,7 @@ def collect_data():
         print("Début de la collecte des données...")
         base_url = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/subventions-associations-votees-/records"
         all_records = []
-        limit = 100
+        limit = 100  # Nombre maximum de résultats par requête
         offset = 0
 
         while True:
@@ -34,81 +35,110 @@ def collect_data():
                 print(f"Erreur lors de la collecte des données : {response.text}")
                 break
 
-        print(f"Nombre total de records collectés : {len(all_records)}")
-        df = pd.DataFrame(all_records)
-        df.to_csv('/opt/airflow/dags/data/subventions_raw.csv', index=False)
-        print("Données enregistrées avec succès.")
+        # Vérifier si des données ont été récupérées
+        if all_records:
+            print(f"Nombre total de records collectés : {len(all_records)}")
+            df = pd.DataFrame(all_records)
+            
+            # Créer un fichier temporaire pour éviter l'accumulation
+            temp_file = '/opt/airflow/dags/data/subventions_raw.csv'
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+            df.to_csv(temp_file, index=False)
+            print("Données enregistrées avec succès dans le fichier temporaire.")
+        else:
+            print("Aucune donnée collectée.")
 
     except Exception as e:
         print(f"Erreur dans collect_data : {str(e)}")
 
 # Fonction 2 : Prétraitement des données
 def preprocess_data(**kwargs):
-    # Charger les données brutes
-    df = pd.read_csv('/opt/airflow/dags/data/subventions_raw.csv')
+    try:
+        temp_file = '/opt/airflow/dags/data/subventions_raw.csv'
+        if not os.path.exists(temp_file):
+            print(f"Fichier {temp_file} introuvable. Annulation du prétraitement.")
+            return
 
-    # Nettoyage des données
-    df['secteurs_d_activites_definies_par_l_association'].fillna('Non spécifié', inplace=True)
-    df['montant_vote'].fillna(0, inplace=True)
-    df['nom_beneficiaire'].fillna('Inconnu', inplace=True)
-    df['numero_siret'].fillna('00000000000000', inplace=True)
+        df = pd.read_csv(temp_file)
 
-    # Sauvegarde des données nettoyées
-    df.to_csv('/opt/airflow/dags/data/subventions_cleaned.csv', index=False)
-    print("Données prétraitées et sauvegardées.")
+        # Nettoyage et conversions
+        df['secteurs_d_activites_definies_par_l_association'] = df['secteurs_d_activites_definies_par_l_association'].fillna('Non spécifié')
+        df['montant_vote'] = pd.to_numeric(df['montant_vote'], errors='coerce').fillna(0).astype('float64')
+        df['nom_beneficiaire'] = df['nom_beneficiaire'].fillna('Inconnu')
+        df['numero_siret'] = df['numero_siret'].fillna('00000000000000')
+        df['annee_budgetaire'] = pd.to_numeric(df['annee_budgetaire'], errors='coerce')
 
-# Fonction 3 : Stockage dans PostgreSQL
+        # Filtrer les valeurs hors limite
+        df = df[df['montant_vote'] <= 9223372036854775807]  # BIGINT max
+        df = df[df['annee_budgetaire'] <= 2147483647]  # INTEGER max
+
+        # Sauvegarde dans un fichier nettoyé
+        cleaned_file = '/opt/airflow/dags/data/subventions_cleaned.csv'
+        if os.path.exists(cleaned_file):
+            os.remove(cleaned_file)
+        df.to_csv(cleaned_file, index=False)
+        print("Données prétraitées et sauvegardées.")
+
+    except Exception as e:
+        print(f"Erreur dans preprocess_data : {str(e)}")
+
 def store_to_postgresql(**kwargs):
     # Charger les données nettoyées
     df = pd.read_csv('/opt/airflow/dags/data/subventions_cleaned.csv')
 
-    # Connexion à PostgreSQL (via le service Docker)
+    # Connexion à PostgreSQL
     conn = psycopg2.connect(
-        dbname="airflow",         # Nom de la base défini dans docker-compose.yaml
-        user="airflow",           # Utilisateur défini dans docker-compose.yaml
-        password="airflow",       # Mot de passe défini dans docker-compose.yaml
-        host="postgres",          # Nom du service Docker pour PostgreSQL
-        port="5432"               # Port interne par défaut pour PostgreSQL
+        dbname="airflow",
+        user="airflow",
+        password="airflow",
+        host="postgres",
+        port="5432"
     )
     cursor = conn.cursor()
 
-    # Insérer les données dans la base
+    # Fonction pour insérer une ligne
     def insert_data(row):
-        query = """
-            INSERT INTO subventions (
-                numero_de_dossier,
-                annee_budgetaire,
-                collectivite,
-                nom_beneficiaire,
-                numero_siret,
-                objet_du_dossier,
-                montant_vote,
-                direction,
-                nature_de_la_subvention,
-                secteurs_d_activites_definies_par_l_association
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        cursor.execute(query, (
-            row['numero_de_dossier'],
-            row['annee_budgetaire'],
-            row['collectivite'],
-            row['nom_beneficiaire'],
-            row['numero_siret'],
-            row['objet_du_dossier'],
-            row['montant_vote'],
-            row['direction'],
-            row['nature_de_la_subvention'],
-            row['secteurs_d_activites_definies_par_l_association']
-        ))
+        try:
+            query = """
+                INSERT INTO subventions (
+                    numero_de_dossier,
+                    annee_budgetaire,
+                    collectivite,
+                    nom_beneficiaire,
+                    numero_siret,
+                    objet_du_dossier,
+                    montant_vote,
+                    direction,
+                    nature_de_la_subvention,
+                    secteurs_d_activites_definies_par_l_association
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(query, (
+                row['numero_de_dossier'],
+                int(row['annee_budgetaire']) if pd.notna(row['annee_budgetaire']) else None,
+                row['collectivite'],
+                row['nom_beneficiaire'],
+                row['numero_siret'],
+                row['objet_du_dossier'],
+                float(row['montant_vote']) if pd.notna(row['montant_vote']) else None,
+                row['direction'],
+                row['nature_de_la_subvention'],
+                row['secteurs_d_activites_definies_par_l_association']
+            ))
+            conn.commit()  # Commit uniquement si l'insertion réussit
+        except Exception as e:
+            conn.rollback()  # Rétablir la transaction si une erreur survient
+            print(f"Erreur lors de l'insertion de la ligne : {row}")
+            print(f"Exception : {e}")
 
     # Appliquer les insertions ligne par ligne
     df.apply(insert_data, axis=1)
 
-    # Commit des changements et fermeture de la connexion
-    conn.commit()
+    # Fermeture de la connexion
     cursor.close()
     conn.close()
-    print("Données insérées dans PostgreSQL (Docker) avec succès.")
+    print("Données insérées dans PostgreSQL avec succès.")
 
 
 # Paramètres du DAG
@@ -122,31 +152,27 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
-# Initialisation du DAG
 with DAG(
     'subventions_pipeline',
     default_args=default_args,
     description='Pipeline complet pour les subventions parisiennes',
-    schedule='@daily',
+    schedule_interval='@daily',
+    catchup=False,
 ) as dag:
 
-    # Tâche 1 : Collecte des données
     collect_task = PythonOperator(
         task_id='collect_data',
         python_callable=collect_data,
     )
 
-    # Tâche 2 : Prétraitement des données
     preprocess_task = PythonOperator(
         task_id='preprocess_data',
         python_callable=preprocess_data,
     )
 
-    # Tâche 3 : Stockage dans PostgreSQL
     store_task = PythonOperator(
         task_id='store_to_postgresql',
         python_callable=store_to_postgresql,
     )
 
-    # Dépendances entre les tâches
     collect_task >> preprocess_task >> store_task
