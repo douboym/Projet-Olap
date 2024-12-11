@@ -6,6 +6,7 @@ Ce projet contient un pipeline Airflow pour analyser les subventions des associa
 
 - **Docker** et **Docker Compose** doivent être installés sur votre machine.
 - Une connexion internet est requise pour accéder à l'API OpenData Paris.
+- **kubectl** doit être installé pour interagir avec les pods Kubernetes.
 
 ## Installation
 
@@ -47,6 +48,85 @@ Le pipeline est composé de trois étapes principales :
 
 Les résultats peuvent être consultés directement dans PostgreSQL ou sous forme de fichiers CSV.
 
+## Vérification des données dans PostgreSQL
+
+Une fois le pipeline exécuté avec succès, vous pouvez vérifier les données insérées dans la base PostgreSQL :
+
+1. Accédez au pod PostgreSQL via kubectl :
+   ```bash
+   kubectl exec -it <nom_du_pod_postgres> -- psql -U airflow -d airflow
+   ```
+
+   Remplacez `<nom_du_pod_postgres>` par le nom de votre pod PostgreSQL (vous pouvez utiliser `kubectl get pods` pour lister les pods).
+
+2. Exécutez une requête SQL pour voir les données :
+   ```sql
+   SELECT * FROM subventions LIMIT 10;
+   ```
+
+3. Vérifiez le nombre total de lignes insérées :
+   ```sql
+   SELECT COUNT(*) FROM subventions;
+   ```
+
+## Commandes utiles pour le projet
+
+### Gestion des DAGs Airflow
+
+- Tester une tâche spécifique :
+  ```bash
+  kubectl exec -it <nom_du_pod_airflow> -c webserver -- airflow tasks test subventions_pipeline <nom_tâche> <date>
+  ```
+  Exemple :
+  ```bash
+  kubectl exec -it airflow-<id_pod> -c webserver -- airflow tasks test subventions_pipeline store_to_postgresql 2024-12-10T00:50:00
+  ```
+
+- Vérifier les logs d'Airflow :
+  ```bash
+  kubectl exec -it <nom_du_pod_airflow> -c webserver -- cat /opt/airflow/logs/<nom_dag>/<nom_tâche>/<date>/1.log
+  ```
+
+- Copier un fichier DAG vers le conteneur Airflow :
+  ```bash
+  kubectl cp <chemin_du_fichier> <nom_du_pod_airflow>:/opt/airflow/dags/ -c webserver
+  ```
+
+### Interagir avec PostgreSQL
+
+- Accéder à PostgreSQL :
+  ```bash
+  kubectl exec -it <nom_du_pod_postgres> -- psql -U airflow -d airflow
+  ```
+
+- Lister les tables dans PostgreSQL :
+  ```sql
+  \dt
+  ```
+
+- Voir la structure de la table `subventions` :
+  ```sql
+  \d subventions
+  ```
+
+### Gestion des pods Kubernetes
+
+- Lister tous les pods :
+  ```bash
+  kubectl get pods
+  ```
+
+- Voir les détails d'un pod spécifique :
+  ```bash
+  kubectl describe pod <nom_du_pod>
+  ```
+
+- Redémarrer un service ou un pod :
+  ```bash
+  kubectl delete pod <nom_du_pod>
+  ```
+  Kubernetes redéploiera automatiquement un nouveau pod.
+
 ## Contributions
 
 1. Faites une branche à partir de `main` :
@@ -79,5 +159,10 @@ Les résultats peuvent être consultés directement dans PostgreSQL ou sous form
   docker-compose up -d
   ```
 
+- **Pipeline bloqué ou en échec** :
+  Vérifiez les logs des tâches dans l'interface Airflow ou en utilisant les commandes kubectl mentionnées ci-dessus.
 
+## Licence
+
+Ce projet est sous licence MIT. Consultez le fichier LICENSE pour plus d'informations.
 
