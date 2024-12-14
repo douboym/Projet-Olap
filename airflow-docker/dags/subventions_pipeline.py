@@ -6,6 +6,59 @@ import requests
 import psycopg2
 import os
 
+
+def check_and_create_table():
+    """
+    Check if the 'subventions' table exists in PostgreSQL, and create it if it doesn't.
+    """
+    try:
+        conn = psycopg2.connect(
+            dbname="airflow",
+            user="airflow",
+            password="airflow",
+            host="postgres",
+            port="5432"
+        )
+        cursor = conn.cursor()
+
+        # SQL to check if the table exists
+        check_table_query = """
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = 'subventions'
+        );
+        """
+        cursor.execute(check_table_query)
+        table_exists = cursor.fetchone()[0]
+
+        # If the table doesn't exist, create it
+        if not table_exists:
+            create_table_query = """
+            CREATE TABLE subventions (
+                numero_de_dossier VARCHAR PRIMARY KEY,
+                annee_budgetaire INTEGER,
+                collectivite VARCHAR,
+                nom_beneficiaire VARCHAR,
+                numero_siret VARCHAR,
+                objet_du_dossier TEXT,
+                montant_vote FLOAT,
+                direction VARCHAR,
+                nature_de_la_subvention VARCHAR,
+                secteurs_d_activites_definies_par_l_association VARCHAR
+            );
+            """
+            cursor.execute(create_table_query)
+            conn.commit()
+            print("Table 'subventions' has been created successfully.")
+        else:
+            print("Table 'subventions' already exists.")
+
+        # Close the connection
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"Error in check_and_create_table: {e}")
+
 # Fonction 1 : Collecte des données
 def collect_data():
     try:
@@ -160,6 +213,11 @@ with DAG(
     catchup=False,
 ) as dag:
 
+    check_table_task = PythonOperator(
+        task_id='check_and_create_table',
+        python_callable=check_and_create_table,
+    )
+
     collect_task = PythonOperator(
         task_id='collect_data',
         python_callable=collect_data,
@@ -175,4 +233,4 @@ with DAG(
         python_callable=store_to_postgresql,
     )
 
-    collect_task >> preprocess_task >> store_task
+    check_table_task >> collect_task >> preprocess_task >> store_task
