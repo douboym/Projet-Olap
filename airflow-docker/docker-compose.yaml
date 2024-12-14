@@ -11,10 +11,42 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  airflow-init:
+    image: apache/airflow:2.5.1
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    entrypoint: ["airflow", "db", "init"]
+
+  create-user:
+    image: apache/airflow:2.5.1
+    depends_on:
+      - postgres
+      - airflow-init
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    entrypoint: ["airflow", "users", "create"]
+    command: [
+      "--username", "admin",
+      "--password", "admin_password",
+      "--firstname", "Admin",
+      "--lastname", "User",
+      "--role", "Admin",
+      "--email", "admin@example.com"
+    ]
+
   webserver:
     image: apache/airflow:2.5.1
     depends_on:
       - postgres
+      - airflow-init
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -28,11 +60,11 @@ services:
       - ./plugins:/opt/airflow/plugins
     command: webserver
 
-
   scheduler:
     image: apache/airflow:2.5.1
     depends_on:
       - postgres
+      - airflow-init
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
