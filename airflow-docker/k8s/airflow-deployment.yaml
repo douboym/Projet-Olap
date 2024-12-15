@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow
+  template:
+    metadata:
+      labels:
+        app: airflow
+    spec:
+      initContainers:
+        - name: init-db
+          image: lngeth/custom-airflow-spark:latest
+          command: ["airflow", "db", "init"]
+          env:
+            - name: AIRFLOW__CORE__SQL_ALCHEMY_CONN
+              value: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+        - name: create-airflow-user
+          image: lngeth/custom-airflow-spark:latest
+          command: 
+            - "bash"
+            - "-c"
+            - "airflow users create --username admin --password admin --firstname Admin --lastname User --email admin@example.com --role Admin"
+          env:
+            - name: AIRFLOW__CORE__SQL_ALCHEMY_CONN
+              value: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      volumes:
+        - name: airflow-dags
+          hostPath:
+            path: /home/airflow/dags
+        - name: airflow-data
+          persistentVolumeClaim:
+            claimName: airflow-data-pvc
+        - name: airflow-config-volume
+          configMap:
+            name: airflow-config
+        - name: airflow-logs
+          hostPath:
+            path: /home/airflow/logs
+      containers:
+        - name: webserver
+          image: lngeth/custom-airflow-spark:latest
+          command: ["airflow", "webserver"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AIRFLOW__CORE__SQL_ALCHEMY_CONN
+              value: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: LocalExecutor
+          volumeMounts:
+            - mountPath: /opt/airflow/airflow.cfg
+              name: airflow-config-volume
+              subPath: airflow.cfg
+            - mountPath: /opt/airflow/dags
+              name: airflow-dags
+            - mountPath: /opt/airflow/dags/data
+              name: airflow-data
+            - mountPath: /opt/airflow/logs
+              name: airflow-logs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow-scheduler
+    spec:
+      containers:
+        - name: scheduler
+          image: lngeth/custom-airflow-spark:latest
+          command: ["airflow", "scheduler"]
+          env:
+            - name: AIRFLOW__CORE__SQL_ALCHEMY_CONN
+              value: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: LocalExecutor
+          volumeMounts:
+            - mountPath: /opt/airflow/dags
+              name: airflow-dags
+            - mountPath: /opt/airflow/dags/data
+              name: airflow-data
+            - mountPath: /opt/airflow/logs
+              name: airflow-logs
+      volumes:
+        - name: airflow-dags
+          hostPath:
+            path: /home/airflow/dags
+        - name: airflow-data
+          persistentVolumeClaim:
+            claimName: airflow-data-pvc
+        - name: airflow-logs
+          hostPath:
+            path: /home/airflow/logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: airflow
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-scheduler
+spec:
+  ports:
+    - port: 8793
+  selector:
+    app: airflow-scheduler
