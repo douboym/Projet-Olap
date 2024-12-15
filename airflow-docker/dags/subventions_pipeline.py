@@ -3,15 +3,21 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 import pandas as pd
 import requests
-import psycopg2
 import os
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when
+from pyspark.sql.types import IntegerType, FloatType
+import psycopg2
 
 
 def check_and_create_table():
     """
     Check if the 'subventions' table exists in PostgreSQL, and create it if it doesn't.
     """
+    
     try:
+        
         conn = psycopg2.connect(
             dbname="airflow",
             user="airflow",
@@ -22,36 +28,39 @@ def check_and_create_table():
         cursor = conn.cursor()
 
         # SQL to check if the table exists
-        check_table_query = """
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_name = 'subventions'
-        );
-        """
-        cursor.execute(check_table_query)
-        table_exists = cursor.fetchone()[0]
-
-        # If the table doesn't exist, create it
-        if not table_exists:
-            create_table_query = """
-            CREATE TABLE subventions (
-                numero_de_dossier VARCHAR PRIMARY KEY,
-                annee_budgetaire INTEGER,
-                collectivite VARCHAR,
-                nom_beneficiaire VARCHAR,
-                numero_siret VARCHAR,
-                objet_du_dossier TEXT,
-                montant_vote FLOAT,
-                direction VARCHAR,
-                nature_de_la_subvention VARCHAR,
-                secteurs_d_activites_definies_par_l_association VARCHAR
+        tables_to_check = ['subventions_raw', 'subventions_cleaned']
+        for table in tables_to_check:
+            check_table_query = f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = '{table}'
             );
             """
-            cursor.execute(create_table_query)
-            conn.commit()
-            print("Table 'subventions' has been created successfully.")
-        else:
-            print("Table 'subventions' already exists.")
+            cursor.execute(check_table_query)
+            table_exists = cursor.fetchone()[0]
+
+            
+            # If the table doesn't exist, create it
+            if not table_exists:
+                create_table_query = f"""
+                CREATE TABLE {table} (
+                    numero_de_dossier VARCHAR PRIMARY KEY,
+                    annee_budgetaire INTEGER,
+                    collectivite VARCHAR,
+                    nom_beneficiaire VARCHAR,
+                    numero_siret VARCHAR,
+                    objet_du_dossier TEXT,
+                    montant_vote FLOAT,
+                    direction VARCHAR,
+                    nature_de_la_subvention VARCHAR,
+                    secteurs_d_activites_definies_par_l_association VARCHAR
+                );
+                """
+                cursor.execute(create_table_query)
+                conn.commit()
+                print(f"Table {table} has been created successfully.")
+            else:
+                print(f"Table {table} already exists.")
 
         # Close the connection
         cursor.close()
@@ -91,14 +100,29 @@ def collect_data():
         # Vérifier si des données ont été récupérées
         if all_records:
             print(f"Nombre total de records collectés : {len(all_records)}")
-            df = pd.DataFrame(all_records)
             
-            # Créer un fichier temporaire pour éviter l'accumulation
-            temp_file = '/opt/airflow/dags/data/subventions_raw.csv'
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-            df.to_csv(temp_file, index=False)
-            print("Données enregistrées avec succès dans le fichier temporaire.")
+            spark = SparkSession.builder \
+                .appName("Collect and Insert raw data into PostgreSQL") \
+                .config("spark.driver.extraClassPath", "/opt/spark/jars/postgresql-42.7.4.jar") \
+                .config("spark.executor.extraClassPath", "/opt/spark/jars/postgresql-42.7.4.jar") \
+                .getOrCreate()
+                
+            df = spark.createDataFrame(all_records)
+            df = df.withColumn("annee_budgetaire", df["annee_budgetaire"].cast(IntegerType())) \
+                .withColumn("montant_vote", df["montant_vote"].cast(FloatType()))
+            
+            df.write \
+                .format("jdbc") \
+                .option("url", "jdbc:postgresql://postgres:5432/airflow") \
+                .option("dbtable", 'subventions_raw') \
+                .option("user", "airflow") \
+                .option("password", "airflow") \
+                .mode("overwrite") \
+                .save()
+            
+            print("Données enregistrées avec succès dans Postgres.")
+            
+            spark.stop()
         else:
             print("Aucune donnée collectée.")
 
@@ -108,91 +132,70 @@ def collect_data():
 # Fonction 2 : Prétraitement des données
 def preprocess_data(**kwargs):
     try:
-        temp_file = '/opt/airflow/dags/data/subventions_raw.csv'
-        if not os.path.exists(temp_file):
-            print(f"Fichier {temp_file} introuvable. Annulation du prétraitement.")
-            return
+        spark = SparkSession.builder \
+            .appName("Collect and Insert raw data into PostgreSQL") \
+            .config("spark.driver.extraClassPath", "/opt/spark/jars/postgresql-42.7.4.jar") \
+            .config("spark.executor.extraClassPath", "/opt/spark/jars/postgresql-42.7.4.jar") \
+            .getOrCreate()
+            
+        properties = {
+            "user": "airflow",
+            "password": "airflow",
+            "driver": "org.postgresql.Driver"
+        }
 
-        df = pd.read_csv(temp_file)
+        # Read data from PostgreSQL into a Spark DataFrame
+        df = spark.read.jdbc(url="jdbc:postgresql://postgres:5432/airflow", table="subventions_raw", properties=properties)
+        print("Données récupérées de PostgreSQL.")
+        
+        # Preprocessing and cleaning the data
+        df = df.withColumn(
+            "secteurs_d_activites_definies_par_l_association", 
+            when(col("secteurs_d_activites_definies_par_l_association").isNull(), "Non spécifié")
+            .otherwise(col("secteurs_d_activites_definies_par_l_association").cast("string"))
+        )
+        
+        df = df.withColumn(
+            "montant_vote", 
+            when(col("montant_vote").isNull(), 0).otherwise(col("montant_vote")).cast("float")
+        )
+        
+        df = df.withColumn(
+            "nom_beneficiaire", 
+            when(col("nom_beneficiaire").isNull(), "Inconnu").otherwise(col("nom_beneficiaire").cast("string"))
+        )
+        
+        df = df.withColumn(
+            "numero_siret", 
+            when(col("numero_siret").isNull(), "00000000000000").otherwise(col("numero_siret").cast("string"))
+        )
 
-        # Nettoyage et conversions
-        df['secteurs_d_activites_definies_par_l_association'] = df['secteurs_d_activites_definies_par_l_association'].fillna('Non spécifié')
-        df['montant_vote'] = pd.to_numeric(df['montant_vote'], errors='coerce').fillna(0).astype('float64')
-        df['nom_beneficiaire'] = df['nom_beneficiaire'].fillna('Inconnu')
-        df['numero_siret'] = df['numero_siret'].fillna('00000000000000')
-        df['annee_budgetaire'] = pd.to_numeric(df['annee_budgetaire'], errors='coerce')
-
+        df = df.withColumn(
+            "annee_budgetaire", 
+            when(col("annee_budgetaire").isNull(), None).otherwise(col("annee_budgetaire")).cast("integer")
+        )
+        
         # Filtrer les valeurs hors limite
-        df = df[df['montant_vote'] <= 9223372036854775807]  # BIGINT max
-        df = df[df['annee_budgetaire'] <= 2147483647]  # INTEGER max
+        df = df.filter(col("montant_vote") <= 9223372036854775807)  # BIGINT max value
+        df = df.filter(col("annee_budgetaire") <= 2147483647)  # INTEGER max value
+        
+        df_cleaned = df.dropna()
 
-        # Sauvegarde dans un fichier nettoyé
-        cleaned_file = '/opt/airflow/dags/data/subventions_cleaned.csv'
-        if os.path.exists(cleaned_file):
-            os.remove(cleaned_file)
-        df.to_csv(cleaned_file, index=False)
+        df_cleaned.write \
+            .format("jdbc") \
+            .option("url", "jdbc:postgresql://postgres:5432/airflow") \
+            .option("dbtable", 'subventions_cleaned') \
+            .option("user", "airflow") \
+            .option("password", "airflow") \
+            .mode("overwrite") \
+            .save()
+        
         print("Données prétraitées et sauvegardées.")
+        
+        spark.stop()
 
     except Exception as e:
         print(f"Erreur dans preprocess_data : {str(e)}")
-
-def store_to_postgresql(**kwargs):
-    # Charger les données nettoyées
-    df = pd.read_csv('/opt/airflow/dags/data/subventions_cleaned.csv')
-
-    # Connexion à PostgreSQL
-    conn = psycopg2.connect(
-        dbname="airflow",
-        user="airflow",
-        password="airflow",
-        host="postgres",
-        port="5432"
-    )
-    cursor = conn.cursor()
-
-    # Fonction pour insérer une ligne
-    def insert_data(row):
-        try:
-            query = """
-                INSERT INTO subventions (
-                    numero_de_dossier,
-                    annee_budgetaire,
-                    collectivite,
-                    nom_beneficiaire,
-                    numero_siret,
-                    objet_du_dossier,
-                    montant_vote,
-                    direction,
-                    nature_de_la_subvention,
-                    secteurs_d_activites_definies_par_l_association
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(query, (
-                row['numero_de_dossier'],
-                int(row['annee_budgetaire']) if pd.notna(row['annee_budgetaire']) else None,
-                row['collectivite'],
-                row['nom_beneficiaire'],
-                row['numero_siret'],
-                row['objet_du_dossier'],
-                float(row['montant_vote']) if pd.notna(row['montant_vote']) else None,
-                row['direction'],
-                row['nature_de_la_subvention'],
-                row['secteurs_d_activites_definies_par_l_association']
-            ))
-            conn.commit()  # Commit uniquement si l'insertion réussit
-        except Exception as e:
-            conn.rollback()  # Rétablir la transaction si une erreur survient
-            print(f"Erreur lors de l'insertion de la ligne : {row}")
-            print(f"Exception : {e}")
-
-    # Appliquer les insertions ligne par ligne
-    df.apply(insert_data, axis=1)
-
-    # Fermeture de la connexion
-    cursor.close()
-    conn.close()
-    print("Données insérées dans PostgreSQL avec succès.")
-
 
 # Paramètres du DAG
 default_args = {
@@ -227,10 +230,6 @@ with DAG(
         task_id='preprocess_data',
         python_callable=preprocess_data,
     )
-
-    store_task = PythonOperator(
-        task_id='store_to_postgresql',
-        python_callable=store_to_postgresql,
-    )
-
-    check_table_task >> collect_task >> preprocess_task >> store_task
+    
+    check_table_task >> collect_task >> preprocess_task
+    
