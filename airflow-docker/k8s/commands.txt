@@ -1,8 +1,6 @@
 deploy all pods:
 kubectl apply -f airflow-config.yaml
-wait 3
 kubectl apply -f postgres-deployment.yaml
-wait 3
 kubectl apply -f airflow-deployment.yaml
 
 delete all pods:
